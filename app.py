@@ -12,6 +12,13 @@ ROOT = Path(__file__).resolve().parent
 TEMPLATE = ROOT / "nuclei-templates" / "http-missing-security-headers.yaml"
 RESULTS = ROOT / "results"
 DEFAULT_ORIGINS = "http://127.0.0.1:8000,http://localhost:8000"
+# The four headers checked by the bundled template (matcher names in the YAML).
+CHECKED_HEADERS = [
+    "x-content-type-options",
+    "content-security-policy",
+    "x-frame-options",
+    "referrer-policy",
+]
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 4096
 
@@ -51,10 +58,14 @@ def scan_target(target):
     if not TEMPLATE.is_file():
         raise RuntimeError("Bundled Nuclei template is missing.")
     RESULTS.mkdir(parents=True, exist_ok=True)
-    output = RESULTS / ("scan_" + uuid.uuid4().hex + ".jsonl")
+    scan_id = uuid.uuid4().hex
+    output = RESULTS / ("scan_" + scan_id + ".jsonl")
+    # Nuclei exits 0 even when the target is unreachable, so request errors
+    # are written to a separate log and checked after the scan.
+    error_log = RESULTS / ("scan_" + scan_id + ".errors.jsonl")
     cmd = [
         os.environ.get("NUCLEI_BIN", "nuclei"), "-u", target,
-        "-t", str(TEMPLATE), "-jsonl", "-o", str(output),
+        "-t", str(TEMPLATE), "-jsonl", "-o", str(output), "-elog", str(error_log),
         "-c", "1", "-rl", "1", "-timeout", "10", "-retries", "0",
         "-silent", "-duc", "-ni", "-no-color", "-dr", "-no-stdin",
     ]
@@ -70,6 +81,10 @@ def scan_target(target):
     message = (proc.stderr or "").strip()[:3000]
     if proc.returncode:
         raise RuntimeError("Nuclei failed (exit " + str(proc.returncode) + "): " + message)
+    request_errors = read_error_log(error_log)
+    if request_errors:
+        raise RuntimeError("Nuclei could not check the target: " + "; ".join(request_errors)
+                           + ". Is the practice website running?")
     findings = []
     if output.is_file():
         try:
@@ -83,6 +98,40 @@ def scan_target(target):
         except (OSError, ValueError) as exc:
             raise RuntimeError("Invalid Nuclei JSONL output: " + str(exc)) from exc
     return findings, message
+
+
+def read_error_log(path):
+    """Return the request error messages Nuclei logged (empty list if none)."""
+    if not path.is_file():
+        return []
+    errors = []
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    item = json.loads(line)
+                    text = item.get("error", "") if isinstance(item, dict) else ""
+                except ValueError:
+                    text = line.strip()
+                errors.append(str(text or "unknown request error")[:300])
+    except OSError as exc:
+        return ["cannot read Nuclei error log: " + str(exc)]
+    return list(dict.fromkeys(errors))[:5]
+
+
+def summarize_headers(findings):
+    """Return one row per checked header: Missing if Nuclei reported it, else Present.
+
+    Only called after a successful scan, so "Present" means the template ran
+    and its matcher for that header did not fire.
+    """
+    missing = {str(f.get("matcher-name", "")).lower() for f in findings}
+    rows = [{"header": h, "status": "Missing" if h in missing else "Present"}
+            for h in CHECKED_HEADERS]
+    missing_count = sum(1 for r in rows if r["status"] == "Missing")
+    return {"rows": rows, "missing": missing_count, "total": len(CHECKED_HEADERS)}
 
 
 @app.get("/")
@@ -102,6 +151,7 @@ def scan():
     except RuntimeError as exc:
         return render_template("index.html", target=target, error=str(exc)), 502
     return render_template("index.html", target=target, findings=findings,
+                           summary=summarize_headers(findings),
                            stderr=stderr, completed=True)
 
 

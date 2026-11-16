@@ -10,6 +10,8 @@ button { padding: .6rem 1rem }
 table { width: 100%; border-collapse: collapse }
 th,td { padding: .5rem; border: 1px solid #aaa; text-align: left; overflow-wrap: anywhere }
 .error { color: #ae1212; font-weight: bold }
+.missing { color: #ae1212; font-weight: bold }
+.present { color: #17663a; font-weight: bold }
 pre { white-space: pre-wrap; overflow-wrap: anywhere }
 </style>
 </head>
@@ -26,6 +28,20 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere }
 <p class="error" role="alert">Scan error: {{ error }}</p>
 {% elif completed %}
 <h2>Results for {{ target }}</h2>
+{% if summary %}
+<section id="summary">
+<h3>Header summary: {{ summary.missing }} of {{ summary.total }} checked headers missing</h3>
+<table>
+<thead><tr><th>Header</th><th>Status</th></tr></thead>
+<tbody>
+{% for row in summary.rows %}
+<tr><td>{{ row.header }}</td><td class="{{ row.status | lower }}">{{ row.status }}</td></tr>
+{% endfor %}
+</tbody></table>
+<p>Only these four headers are checked. "Present" does not mean the header value is correct.</p>
+</section>
+<h3>Findings</h3>
+{% endif %}
 {% if findings %}
 <table>
 <thead><tr><th>Severity</th><th>Template</th><th>Missing header</th><th>URL</th><th>Description</th></tr></thead>

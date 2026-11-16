@@ -82,6 +82,53 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"x-frame-options", response.data)
 
+    # --- Improvement: header summary ---
+    def test_summary_normal_case(self):
+        """Two headers reported missing -> summary says 2 of 4, others Present."""
+        def run(cmd, **kwargs):
+            lines = [json.dumps({"info": {"name": "Header test", "severity": "info"},
+                                 "matcher-name": name}) for name in
+                     ("content-security-policy", "x-frame-options")]
+            Path(cmd[cmd.index("-o") + 1]).write_text("\n".join(lines) + "\n", encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        with patch.object(scanner.subprocess, "run", side_effect=run):
+            response = self.request("http://127.0.0.1:8000")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"2 of 4 checked headers missing", response.data)
+        summary = scanner.summarize_headers([
+            {"matcher-name": "content-security-policy"}, {"matcher-name": "x-frame-options"}])
+        status = {r["header"]: r["status"] for r in summary["rows"]}
+        self.assertEqual(status["content-security-policy"], "Missing")
+        self.assertEqual(status["x-frame-options"], "Missing")
+        self.assertEqual(status["x-content-type-options"], "Present")
+        self.assertEqual(status["referrer-policy"], "Present")
+
+    def test_summary_zero_findings(self):
+        with patch.object(scanner.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")):
+            response = self.request("http://127.0.0.1:8000")
+        self.assertIn(b"0 of 4 checked headers missing", response.data)
+
+    def test_summary_not_shown_on_failure(self):
+        """If Nuclei fails, the app must NOT claim headers are Present."""
+        with patch.object(scanner.subprocess, "run", side_effect=FileNotFoundError()):
+            response = self.request("http://127.0.0.1:8000")
+        self.assertEqual(response.status_code, 502)
+        self.assertNotIn(b"Header summary", response.data)
+        self.assertNotIn(b"Present", response.data)
+
+    def test_unreachable_target_is_error_not_all_present(self):
+        """Nuclei exits 0 with no findings when the site is down; the error log must turn that into an error."""
+        def run(cmd, **kwargs):
+            Path(cmd[cmd.index("-elog") + 1]).write_text(
+                json.dumps({"input": "http://127.0.0.1:8000",
+                            "error": "port closed or filtered"}) + "\n", encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        with patch.object(scanner.subprocess, "run", side_effect=run):
+            response = self.request("http://127.0.0.1:8000")
+        self.assertEqual(response.status_code, 502)
+        self.assertIn(b"port closed or filtered", response.data)
+        self.assertNotIn(b"Header summary", response.data)
+
     def test_bad_jsonl_is_error(self):
         def run(cmd, **kwargs):
             Path(cmd[cmd.index("-o") + 1]).write_text("{bad", encoding="utf-8")
